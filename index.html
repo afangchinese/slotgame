@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Canvas 拉霸（自動縮放換行 + 金色結果框 + 暫存）</title>
+<style>
+  :root{--gap:18px;--radius:26px;--panelH:440px;--titleH:54px;--itemH:88px;}
+  *{box-sizing:border-box;font-family:system-ui,-apple-system,"Segoe UI",Noto Sans TC,Arial;}
+  body{margin:0;background:#f6f7fb;color:#1f2937}
+  header,.toolbar{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  header{padding:14px 16px;position:sticky;top:0;background:#f6f7fb;z-index:5}
+  h1{font-size:18px;margin:0 8px 0 0;color:#111827}
+  button{border:0;border-radius:999px;padding:12px 22px;font-weight:700;cursor:pointer}
+  .btn{background:#2563eb;color:#fff}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn-ghost{background:#eef2ff;color:#1f2b5c}
+  .btn-grey{background:#9ca3af;color:#fff}
+  .page{max-width:1200px;margin:0 auto;padding:8px 16px 24px}
+  .hidden{display:none}
+  /* 參數頁 */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+  .card{background:#fff;border-radius:16px;padding:14px;border:1px solid #e5e7eb;box-shadow:0 1px 0 rgba(0,0,0,.04)}
+  .row{display:flex;gap:8px;align-items:center;margin:6px 0}
+  .row>label{width:64px;font-size:13px;color:#4b5563}
+  input[type="text"], textarea, select{width:100%;padding:8px 10px;border:1px solid #e5e7eb;border-radius:10px;background:#fafafa}
+  textarea{min-height:120px;font-size:14px}
+  small.help{color:#6b7280}
+  /* 遊戲頁 */
+  #stageWrap{position:relative;background:transparent;margin-top:8px}
+  #stage{display:block;width:100%;height:520px;background:transparent}
+  #colNudges{display:grid;gap:10px;margin-top:10px}
+  .chip{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-radius:12px;border:2px solid transparent;background:#fff}
+  .chip .left{display:flex;align-items:center;gap:8px}
+  .chip .title{font-weight:700;font-size:13px}
+  .chip .buttons{display:flex;gap:6px}
+  .chip button{padding:6px 10px;border-radius:10px;background:rgba(255,255,255,.6);border:1px solid rgba(0,0,0,.08)}
+  .chip button:disabled{opacity:.45}
+  /* 放大結果 */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center}
+  .modal.show{display:flex}
+  .modal .panel{background:#fff;padding:28px 34px;border-radius:18px;max-width:90vw}
+  .resultBig{font-size:56px;line-height:1.35;text-align:center;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<header>
+  <h1>Canvas 拉霸</h1>
+  <div class="toolbar">
+    <button id="toSetup" class="btn-ghost">◀ 返回參數頁</button>
+    <button id="btnStart" class="btn-grey" disabled>開始</button>
+    <button id="btnShow" class="btn" disabled>放大結果</button>
+  </div>
+</header>
+
+<!-- 參數頁 -->
+<section id="pageSetup" class="page">
+  <div class="card">
+    <div class="row">
+      <label>欄位數</label>
+      <select id="colCount">
+        <option>1</option><option>2</option><option>3</option>
+        <option selected>4</option><option>5</option><option>6</option>
+      </select>
+    </div>
+    <small class="help">每欄「資料」用換行分隔；至少 3 筆較好看。</small>
+  </div>
+  <div id="colForms" class="grid"></div>
+  <div style="margin-top:14px">
+    <button id="toPlay" class="btn">前往遊戲頁</button>
+  </div>
+</section>
+
+<!-- 遊戲頁 -->
+<section id="pagePlay" class="page hidden">
+  <div id="stageWrap">
+    <canvas id="stage" width="1200" height="520"></canvas>
+  </div>
+  <div id="colNudges"></div>
+</section>
+
+<!-- 放大結果 -->
+<div id="dlg" class="modal"><div class="panel">
+  <div id="resultBig" class="resultBig"></div>
+  <div style="text-align:center;margin-top:14px">
+    <button id="dlgClose" class="btn-ghost">關閉</button>
+  </div>
+</div></div>
+
+<script>
+/* ---------- 工具 ---------- */
+const $ = sel => document.querySelector(sel);
+const el = (tag, attrs={}, children=[])=>{
+  const n=document.createElement(tag);
+  Object.entries(attrs).forEach(([k,v])=>{
+    if(k==='class') n.className=v; else if(k==='text') n.textContent=v;
+    else n.setAttribute(k,v);
+  });
+  children.forEach(c=>n.appendChild(c));
+  return n;
+};
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+const debounce=(fn,ms=300)=>{let t;return(...args)=>{clearTimeout(t);t=setTimeout(()=>fn(...args),ms);}};
+
+/* ---------- 常數 / 預設 ---------- */
+const COLORS=['#ef4444','#22c55e','#14b8a6','#a855f7','#f59e0b','#3b82f6'];
+const DEFAULTS=[
+  {title:'什么时侯',color:COLORS[0],items:'早上 zǎoshang\n中午 zhōngwǔ\n晚上 wǎnshang'},
+  {title:'谁',color:COLORS[1],items:'姐姐 jiějie\n弟弟 dìdi\n妹妹 mèimei\n爷爷 yéye\n叔叔 shūshu\n同学们 tóngxué men'},
+  {title:'做什么',color:COLORS[2],items:'篮球 lánqiú\n躲避球 duǒbìqiú\n棒球 bàngqiú\n排球 páiqiú\n足球 zúqiú'}
+];
+const S={titleH:54,itemH:88,panelH:440,gap:18,radius:26,sidePad:18};
+const CENTER_SHIFT=2;
+const STORAGE_KEY='slotCanvasConfigV2';
+
+/* ---------- 狀態 ---------- */
+let columns=[];          // 遊戲用欄位
+let spinning=false;
+
+/* ---------- 暫存：localStorage ---------- */
+function readFormsToConfig(){
+  const n=parseInt($('#colCount').value,10);
+  const cols=[];
+  for(let i=0;i<n;i++){
+    cols.push({
+      title: ($(`#title${i}`)?.value||'').trim() || `欄位${i+1}`,
+      color: $(`#color${i}`)?.value || COLORS[i%COLORS.length],
+      items: ($(`#items${i}`)?.value||'').trim()
+    });
+  }
+  return {colCount:n, cols};
+}
+function saveConfig(cfg){ try{localStorage.setItem(STORAGE_KEY,JSON.stringify(cfg));}catch(e){} }
+const saveConfigDebounced=debounce(()=>saveConfig(readFormsToConfig()),400);
+function loadConfig(){
+  try{
+    const raw=localStorage.getItem(STORAGE_KEY);
+    if(!raw) return null;
+    const cfg=JSON.parse(raw);
+    if(!cfg||!Array.isArray(cfg.cols)) return null;
+    cfg.colCount=clamp(parseInt(cfg.colCount||cfg.cols.length||4,10),1,6);
+    cfg.cols=cfg.cols.slice(0,cfg.colCount).map((c,i)=>({
+      title:c.title||`欄位${i+1}`,
+      color:c.color||COLORS[i%COLORS.length],
+      items:c.items||'選項A\n選項B\n選項C'
+    }));
+    return cfg;
+  }catch(e){return null;}
+}
+
+/* ---------- 參數頁 ---------- */
+const colCountSel=$('#colCount'); const colForms=$('#colForms');
+function buildForms(cfg=null){
+  const source=cfg||loadConfig();
+  if(source){ colCountSel.value=String(source.colCount); }
+  colForms.innerHTML='';
+  const n=parseInt(colCountSel.value,10);
+  for(let i=0;i<n;i++){
+    const d=source?.cols?.[i] ?? DEFAULTS[i] ?? {title:`欄位${i+1}`,color:COLORS[i%COLORS.length],items:'選項A\n選項B\n選項C'};
+    colForms.appendChild(el('div',{class:'card'},[
+      el('div',{class:'row'},[el('label',{text:'標題'}), el('input',{type:'text',value:d.title,id:`title${i}`})]),
+      el('div',{class:'row'},[el('label',{text:'顏色'}), el('input',{type:'color',value:d.color,id:`color${i}`})]),
+      el('div',{class:'row'},[el('label',{text:'資料'}), el('textarea',{id:`items${i}`},[])]),
+    ]));
+    setTimeout(()=>{ $(`#items${i}`).value=d.items; },0);
+  }
+  colForms.addEventListener('input',saveConfigDebounced,{once:true});
+  colCountSel.addEventListener('change',saveConfigDebounced,{once:true});
+}
+buildForms();
+colCountSel.addEventListener('change',()=>buildForms());
+
+/* ---------- 聲音 ---------- */
+const audio=(()=>{
+  const ctx=new (window.AudioContext||window.webkitAudioContext)();
+  let spinNode=null,gain=null;
+  function startSpin(){ stopSpin();
+    const o=ctx.createOscillator(); o.type='triangle'; o.frequency.value=120;
+    const g=ctx.createGain(); g.gain.value=0.06;
+    const lfo=ctx.createOscillator(); lfo.frequency.value=7;
+    const lfoG=ctx.createGain(); lfoG.gain.value=30; lfo.connect(lfoG); lfoG.connect(o.frequency);
+    o.connect(g).connect(ctx.destination); o.start(); lfo.start();
+    spinNode=o; gain=g;
+  }
+  function stopSpin(){ if(spinNode){ gain.gain.exponentialRampToValueAtTime(0.0001,ctx.currentTime+0.1); spinNode.stop(ctx.currentTime+0.12); spinNode.disconnect(); spinNode=null; } }
+  function ding(){ const o=ctx.createOscillator(),g=ctx.createGain(); o.type='sine'; o.frequency.value=880; g.gain.value=.2; o.connect(g).connect(ctx.destination); o.start(); g.gain.exponentialRampToValueAtTime(0.0001,ctx.currentTime+0.25); o.stop(ctx.currentTime+0.26); }
+  function tick(vol=.08,freq=1400){ const o=ctx.createOscillator(),g=ctx.createGain(); o.type='square'; o.frequency.value=freq; g.gain.value=vol; o.connect(g).connect(ctx.destination); o.start(); const now=ctx.currentTime; g.gain.exponentialRampToValueAtTime(0.0001,now+0.02+Math.random()*0.01); o.stop(now+0.03); }
+  return {ctx,startSpin,stopSpin,ding,tick};
+})();
+
+/* ---------- 遊戲頁 ---------- */
+const stage=$('#stage'); const ctx=stage.getContext('2d');
+let animId=null,startT=0,duration=2200;
+
+function toPlay(){
+  saveConfig(readFormsToConfig());
+  const n=parseInt($('#colCount').value,10);
+  columns=[];
+  for(let i=0;i<n;i++){
+    const title=$(`#title${i}`).value.trim()||`欄位${i+1}`;
+    const color=$(`#color${i}`).value||COLORS[i%COLORS.length];
+    const items=$(`#items${i}`).value.split('\n').map(s=>s.trim()).filter(Boolean);
+    columns.push({title,color,items,offset:0,vel:0,spin:false,targetIndex:0,_lastStep:-1});
+  }
+  const w=Math.max(800,240*columns.length+(columns.length-1)*S.gap+S.sidePad*2);
+  stage.width=w;
+  const nudges=$('#colNudges'); nudges.style.gridTemplateColumns=`repeat(${columns.length},1fr)`; buildNudges();
+  $('#pageSetup').classList.add('hidden'); $('#pagePlay').classList.remove('hidden');
+  $('#btnStart').disabled=false; $('#btnShow').disabled=true; draw();
+}
+$('#toPlay').addEventListener('click',toPlay);
+
+$('#toSetup').addEventListener('click',()=>{
+  if(columns.length){
+    const cfg={colCount:columns.length, cols:columns.map(c=>({title:c.title,color:c.color,items:c.items.join('\n')}))};
+    saveConfig(cfg); buildForms(cfg);
+  }else{ buildForms(); }
+  $('#pagePlay').classList.add('hidden'); $('#pageSetup').classList.remove('hidden');
+  $('#btnStart').disabled=true; $('#btnShow').disabled=true;
+});
+
+/* ---------- 文字擠壓/換行：永不出界 ---------- */
+function drawFittedText(text, cx, cy, maxW, maxH){
+  const maxFont = Math.floor(maxH*0.48);   // 單行最大高度 ≈ 48% of cell
+  const minFont = 14;
+  const gap = Math.max(6, Math.floor(maxH*0.10)); // 兩行間距
+  const fontFamily = '"Noto Sans TC","Noto Sans","PingFang TC","Microsoft JhengHei",system-ui';
+  const measure = (px, str)=>{ ctx.font=`800 ${px}px ${fontFamily}`; return ctx.measureText(str).width; };
+
+  // 先試單行：縮小到剛好 fits
+  let f = maxFont;
+  while(f>minFont && measure(f,text)>maxW) f--;
+  if(measure(f,text) <= maxW){
+    ctx.font=`800 ${f}px ${fontFamily}`;
+    ctx.fillText(text, cx, cy);
+    return;
+  }
+
+  // 兩行：用空白切詞，找最佳斷點並縮小到同時 fits + 不超出高度
+  const words = text.split(/\s+/);
+  if(words.length===1){ // 沒有空白可切，硬縮
+    ctx.font=`800 ${minFont}px ${fontFamily}`;
+    ctx.fillText(text, cx, cy);
+    return;
+  }
+  let best=null;
+  for(let b=1;b<words.length;b++){
+    const l1=words.slice(0,b).join(' ');
+    const l2=words.slice(b).join(' ');
+    let ff=maxFont;
+    while(ff>minFont && (measure(ff,l1)>maxW || measure(ff,l2)>maxW || (ff*2+gap)>maxH)) ff--;
+    const score=Math.max(measure(ff,l1),measure(ff,l2)); // 越小越好
+    if(!best || score<best.score){ best={l1,l2,size:ff,score}; }
+  }
+  const {l1,l2,size}=best;
+  ctx.font=`800 ${size}px ${fontFamily}`;
+  ctx.fillText(l1, cx, cy - (size/2 + gap/2));
+  ctx.fillText(l2, cx, cy + (size/2 + gap/2));
+}
+
+/* ---------- Canvas 繪圖 ---------- */
+function roundRectPath(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+function drawColumn(col,i,x,w){
+  const {title,color,items,offset}=col;
+  const top=40,panelH=S.panelH,itemH=S.itemH,titleH=S.titleH;
+
+  ctx.save();
+  roundRectPath(x,top,w,panelH,S.radius); ctx.fillStyle='#fff'; ctx.fill(); ctx.clip();
+
+  // 標題
+  ctx.fillStyle=color; ctx.fillRect(x,top,w,titleH);
+  ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.font='700 22px system-ui'; ctx.fillText(title, x+w/2, top+titleH*0.62);
+
+  // 本體背景
+  const bodyY=top+titleH, bodyH=panelH-titleH;
+  ctx.fillStyle='#f8fafc'; ctx.fillRect(x,bodyY,w,bodyH);
+
+  // 內容（循環畫）
+  ctx.save(); ctx.beginPath(); ctx.rect(x,bodyY,w,bodyH); ctx.clip();
+  const total=(items.length||1)*itemH, base=bodyY+bodyH/2-itemH/2;
+  const mod=((offset%total)+total)%total;
+  let yStart=base - mod - itemH*CENTER_SHIFT;
+
+  for(let k=-CENTER_SHIFT;k<items.length+CENTER_SHIFT+1;k++){
+    const y=yStart+k*itemH;
+    // 背板
+    const g=ctx.createLinearGradient(0,y,0,y+itemH);
+    g.addColorStop(0, shade(color,-12)); g.addColorStop(1, shade(color, 2));
+    ctx.fillStyle=g; ctx.fillRect(x+6,y,w-12,itemH-2);
+
+    // 文字（自動縮放＋最多兩行）
+    ctx.fillStyle='#fff';
+    const txt = items.length ? items[(k%items.length+items.length)%items.length] : '';
+    drawFittedText(txt, x+w/2, y+itemH/2, w-40, itemH-12);
+  }
+  ctx.restore();
+  ctx.restore();
+}
+function shade(hex,pct){const v=parseInt(hex.slice(1),16);let r=(v>>16)&255,g=(v>>8)&255,b=v&255;r=Math.round(r*(100+pct)/100);g=Math.round(g*(100+pct)/100);b=Math.round(b*(100+pct)/100);r=Math.max(0,Math.min(255,r));g=Math.max(0,Math.min(255,g));b=Math.max(0,Math.min(255,b));return `rgb(${r},${g},${b})`;}
+
+const GOLD='#FFD700';
+function drawResultFrame(xStart,xEnd){
+  const top=40,titleH=S.titleH,panelH=S.panelH,itemH=S.itemH;
+  const bodyY=top+titleH, bodyH=panelH-titleH;
+  const y=bodyY+bodyH/2-itemH/2, h=itemH;
+
+  ctx.save();
+  ctx.shadowColor='rgba(255,215,0,.55)'; ctx.shadowBlur=18;
+  const grad=ctx.createLinearGradient(0,y,0,y+h);
+  grad.addColorStop(0,'#FFE57F'); grad.addColorStop(.5,'#FFD700'); grad.addColorStop(1,'#E6B800');
+  ctx.lineWidth=6; ctx.strokeStyle=grad;
+  roundRectPath(xStart,y,xEnd-xStart,h,12); ctx.stroke();
+  ctx.restore();
+}
+
+function computeCurrentResults(){
+  return columns.map(c=>{
+    const L=c.items.length||1;
+    const mod=(c.offset%(L*S.itemH)+L*S.itemH)%(L*S.itemH);
+    const idx=(Math.round(mod/S.itemH)+CENTER_SHIFT)%L;
+    return c.items[idx]??'';
+  });
+}
+
+function draw(){
+  ctx.clearRect(0,0,stage.width,stage.height);
+  const n=columns.length; if(!n) return;
+  const totalGap=(n-1)*S.gap;
+  const colW=Math.floor((stage.width - S.sidePad*2 - totalGap)/n);
+  let x=S.sidePad; const firstX=x;
+  for(let i=0;i<n;i++){ drawColumn(columns[i],i,x,colW); x+=colW+S.gap; }
+  const lastRight=x-S.gap; drawResultFrame(firstX,lastRight);
+}
+
+/* ---------- 轉動（含喀喳聲） ---------- */
+function startSpin(){
+  if(spinning||columns.length===0) return;
+  if(audio.ctx.state==='suspended'){ audio.ctx.resume(); }
+  spinning=true; columns.forEach(c=>c._lastStep=-1);
+  $('#btnStart').disabled=true; $('#btnShow').disabled=true;
+  document.querySelectorAll('.chip button').forEach(b=>b.disabled=true);
+  audio.startSpin();
+
+  startT=performance.now();
+  columns.forEach((c,i)=>{
+    const L=c.items.length||1;
+    c.targetIndex=Math.floor(Math.random()*L);
+    const baseOffset=c.targetIndex*S.itemH;
+    const v0=2000-i*180, loops=2+i%2;
+    const totalDist=loops*L*S.itemH + baseOffset - (c.offset%(L*S.itemH)+L*S.itemH)%(L*S.itemH);
+    const t=duration/1000, a=(2*(totalDist - v0*t))/(t*t);
+    c._motion={v0,a}; c.vel=v0; c.spin=true;
+  });
+
+  cancelAnimationFrame(animId);
+  const step=(ts)=>{
+    const dt=(ts-startT)/1000; let allStopped=true;
+    columns.forEach(c=>{
+      if(!c.spin) return;
+      const {v0,a}=c._motion; let v=v0+a*dt;
+      if(dt>=duration/1000){
+        v=0; c.spin=false;
+        const L=c.items.length||1;
+        const mod=(c.offset%(L*S.itemH)+L*S.itemH)%(L*S.itemH);
+        c.offset += c.targetIndex*S.itemH - mod;
+      }else{
+        c.offset += v*(1/60);
+      }
+      if(c.spin){
+        const L=c.items.length||1, per=S.itemH*L;
+        const mod=((c.offset%per)+per)%per;
+        const stepNow=Math.floor(mod/S.itemH);
+        if(stepNow!==c._lastStep){
+          c._lastStep=stepNow;
+          const vNorm=Math.min(Math.abs(v)/1800,1);
+          audio.tick(0.05+0.10*vNorm,1200+400*Math.random());
+        }
+      }
+      c.vel=v; if(c.spin) allStopped=false;
+    });
+
+    draw();
+    if(!allStopped){ animId=requestAnimationFrame(step); }
+    else{
+      cancelAnimationFrame(animId);
+      audio.stopSpin(); audio.ding();
+      spinning=false; $('#btnStart').disabled=false; $('#btnShow').disabled=false;
+      document.querySelectorAll('.chip button').forEach(b=>b.disabled=false);
+    }
+  };
+  animId=requestAnimationFrame(step);
+}
+$('#btnStart').addEventListener('click',startSpin);
+
+/* ---------- 微調（▲/▼） ---------- */
+function buildNudges(){
+  const host=$('#colNudges'); host.innerHTML='';
+  columns.forEach((c,i)=>{
+    const chip=el('div',{class:'chip'});
+    chip.style.borderColor=c.color;
+    chip.style.background=`rgba(${hex2rgb(c.color)},0.10)`;
+    const left=el('div',{class:'left'},[
+      el('span',{style:`width:10px;height:10px;border-radius:999px;background:${c.color};display:inline-block`}),
+      el('span',{class:'title',text:c.title})
+    ]);
+    const btns=el('div',{class:'buttons'},[
+      el('button',{id:`nudUp${i}`,text:'▲',title:'上移一格'}),
+      el('button',{id:`nudDn${i}`,text:'▼',title:'下移一格'})
+    ]);
+    chip.append(left,btns); host.appendChild(chip);
+
+    const nudge=(dir)=>{
+      if(spinning) return;
+      const L=c.items.length||1;
+      const mod=(c.offset%(L*S.itemH)+L*S.itemH)%(L*S.itemH);
+      let idx=Math.round(mod/S.itemH)%L;
+      idx=(idx+dir+L)%L;
+      const target=idx*S.itemH, delta=target-mod;
+      const ms=220, t0=performance.now(), o0=c.offset;
+      const step=(t)=>{
+        const p=clamp((t-t0)/ms,0,1), e=p<.5?2*p*p:-1+(4-2*p)*p;
+        c.offset=o0+delta*e; draw();
+        if(p<1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    };
+    $(`#nudUp${i}`).addEventListener('click',()=>nudge(-1));
+    $(`#nudDn${i}`).addEventListener('click',()=>nudge(+1));
+  });
+}
+function hex2rgb(hex){const v=parseInt(hex.slice(1),16);return `${(v>>16)&255},${(v>>8)&255},${v&255}`;}
+
+/* ---------- 放大結果（讀框內） ---------- */
+$('#btnShow').addEventListener('click',()=>{
+  const res=computeCurrentResults();
+  if(!res.length) return;
+  $('#resultBig').textContent=res.join('\n');
+  $('#dlg').classList.add('show');
+});
+$('#dlgClose').addEventListener('click',()=>$('#dlg').classList.remove('show'));
+
+/* ---------- 初始 ---------- */
+draw();
+</script>
+</body>
+</html>
