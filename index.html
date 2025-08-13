@@ -164,11 +164,17 @@ function buildForms(cfg=null){
     ]));
     setTimeout(()=>{ $(`#items${i}`).value=d.items; },0);
   }
-  colForms.addEventListener('input',saveConfigDebounced,{once:true});
-  colCountSel.addEventListener('change',saveConfigDebounced,{once:true});
+  // 🔧 這裡是關鍵：持續監聽（不再使用 once:true）
+  colForms.oninput = saveConfigDebounced;
+
+  // 欄位數改變 → 先存檔 → 立即重建（UI 與暫存同步）
+  colCountSel.onchange = () => {
+    saveConfig(readFormsToConfig());
+    buildForms();
+  };
 }
 buildForms();
-colCountSel.addEventListener('change',()=>buildForms());
+//colCountSel.addEventListener('change',()=>buildForms());
 
 /* ---------- 聲音 ---------- */
 const audio=(()=>{
